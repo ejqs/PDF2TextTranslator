@@ -1,6 +1,7 @@
 # Sensitive Files
 .env
-
+input/
+output/
 
 # Python-generated files
 __pycache__/
