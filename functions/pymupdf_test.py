@@ -1,29 +1,37 @@
-
-# https://stackoverflow.com/a/53360415
-
 import os
 import pymupdf  # PyMuPDF
 from dotenv import load_dotenv
+
 load_dotenv()
 
 input_filepath = os.environ.get("INPUT_FILEPATH")
-output_filepath = os.environ.get(
-    "OUTPUT_FILEPATH", "output/output_with_text_layer.pdf")
+output_dir = os.environ.get("OUTPUT_DIR", "output")
 
 
-# Now add the text as a layer using PyMuPDF
-doc = pymupdf.open(input_filepath)
+def process_page(page_number):
+    """Process a single page and export it as a separate PDF."""
+    # Open the document
+    doc = pymupdf.open(input_filepath)
+    page = doc.load_page(page_number)
 
-cover_ocg_xref = doc.add_ocg("Cover Boxes")
-translate_ocg_xref = doc.add_ocg("Translation Text")
+    # Create OCG layers for this page
+    cover_ocg_xref = doc.add_ocg(f"Cover Boxes Page {page_number + 1}")
+    translate_ocg_xref = doc.add_ocg(
+        f"Translation Text Page {page_number + 1}")
 
-for page in doc:
-    print(f'Processing page {page.number + 1}...')
+    print(f'Processing page {page_number + 1}...')
     # Extract text blocks
     blocks = page.get_textpage().extractBLOCKS()
+    total_blocks = len(blocks)
+    processed_blocks = 0
+
     for block in blocks:
+        print(
+            f"Page {page_number + 1}: processing block {processed_blocks}/{total_blocks}")
+        processed_blocks += 1
         # The bounding box is the first element
         bbox = block[:4]
+
         # Draw a white rectangle with a green outline
         page.draw_rect(
             bbox,
@@ -50,8 +58,35 @@ for page in doc:
             overlay=True
         )
 
-# Save the PDF with the overlay
-doc.save(output_filepath)
-doc.close()
+    # Save this page to a temporary file
+    single_page_doc = pymupdf.open()
+    single_page_doc.insert_pdf(doc, from_page=page_number, to_page=page_number)
 
-print(f"PDF with overlay saved to: {output_filepath}")
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(
+        output_dir, f"processed_page_{page_number + 1:03d}.pdf")
+
+    single_page_doc.save(output_path)
+    single_page_doc.close()
+    doc.close()
+
+    print(f"Completed page {page_number + 1}, saved to {output_path}")
+
+
+def main():
+    """Main function to process pages sequentially."""
+    # Open the document to get total page count
+    doc = pymupdf.open(input_filepath)
+    total_pages = doc.page_count
+    doc.close()
+
+    print(f"Processing {total_pages} pages sequentially...")
+
+    # Process each page one at a time
+    for page_number in range(total_pages):
+        process_page(page_number)
+
+
+if __name__ == "__main__":
+    main()
