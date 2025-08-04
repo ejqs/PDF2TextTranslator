@@ -52,7 +52,7 @@ def process_page(page_number):
             "Sample text inserted into the rectangle.",
             css=css_style,
             scale_low=0,  # Allow unlimited scaling down to fit
-            rotate=90,
+            rotate=0,
             oc=translate_ocg_xref,
             opacity=1,
             overlay=True
