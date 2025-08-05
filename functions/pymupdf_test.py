@@ -7,6 +7,13 @@ from ai_chat import AI
 import asyncio
 from googletrans import Translator
 from deep_translator import GoogleTranslator
+from rich.progress import (
+    Progress,
+    BarColumn,
+    TextColumn,
+    TimeRemainingColumn,
+    SpinnerColumn
+)
 
 load_dotenv()
 
@@ -163,17 +170,18 @@ def translate_japanese_text(text, ai_instance):
             return translate_offline(text)
 
 
-def process_block(words, page, translate_ocg_xref, ai_instance, block_index, total_words, page_number):
+def process_block(words, page, translate_ocg_xref, ai_instance, block_index, total_words, page_number, progress, task_id):
     """Process a single text block."""
-    print(
-        f"Page {page_number + 1}: processing block {block_index}/{total_words}")
-
     # The bounding box is the first element
     bbox = words[:4]
 
     # Extract text from the block (block[4] contains the text)
-    # original_text = block[4] if len(block) > 4 else ""
     original_text = words[4]
+
+    # Update progress bar for each block
+    progress.update(
+        task_id, description=f"Page {page_number + 1}: Processing block {block_index + 1}/{total_words}")
+    progress.advance(task_id)
     # Draw a white rectangle with a green outline
     # page.draw_rect(
     #     bbox,
@@ -361,37 +369,41 @@ def process_page(page_number):
                         print("  Cannot encode text to bytes")
 
     # Process words concurrently within this page
-    # Limit concurrent words
-
     if total_words > 0:
-        with ThreadPoolExecutor() as block_executor:
-            # Submit all block processing tasks
-            block_futures = [
-                block_executor.submit(
-                    process_block,
-                    block,
-                    page,
-                    translate_ocg_xref,
-                    ai_instance,
-                    idx,
-                    total_words,
-                    page_number
-                )
-                for idx, block in enumerate(words)
-            ]
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeRemainingColumn(),
+            transient=True
+        ) as progress:
+            page_task = progress.add_task(
+                f"Processing Page {page_number + 1}", total=total_words)
 
-            # Wait for all words to complete
-            completed_words = 0
-            for future in as_completed(block_futures):
-                try:
-                    future.result()  # This will raise any exceptions that occurred
-                    completed_words += 1
-                    if completed_words % 50 == 0:  # Progress update every 50 words
+            with ThreadPoolExecutor() as block_executor:
+                block_futures = [
+                    block_executor.submit(
+                        process_block,
+                        block,
+                        page,
+                        translate_ocg_xref,
+                        ai_instance,
+                        idx,
+                        total_words,
+                        page_number,
+                        progress,
+                        page_task
+                    )
+                    for idx, block in enumerate(words)
+                ]
+
+                for future in as_completed(block_futures):
+                    try:
+                        future.result()
+                    except Exception as e:
                         print(
-                            f"Page {page_number + 1}: completed {completed_words}/{total_words} words")
-                except Exception as e:
-                    print(
-                        f"Error processing block on page {page_number + 1}: {e}")
+                            f"Error processing block on page {page_number + 1}: {e}")
 
     # Save the modified single-page document
     os.makedirs(output_dir, exist_ok=True)
@@ -431,34 +443,32 @@ def main():
         except Exception as e:
             print(f"Error processing debug page: {e}")
     else:
-        print(f"Processing {total_pages} pages with multi-threading...")
+        print(f"Processing {total_pages} pages...")
         print(f"Translation method: {translation_method}")
-        print(f"Concurrent processing: Pages AND words within each page")
-
-        # Use ThreadPoolExecutor for parallel processing
-        # https://stackoverflow.com/a/40505434
-        # If max_workers is None or not given, it will default to the number of processors on the machine,
-        # multiplied by 5, assuming that ThreadPoolExecutor is often used to overlap I/O instead of CPU work
-        # and the number of workers should be higher than the number of workers for ProcessPoolExecutor.
-
-        # max_workers = min(4, os.cpu_count())  # Limit to 4 threads or CPU count
-        print(f"Using ??? concurrent page workers")
 
         with ThreadPoolExecutor() as executor:
-            # Submit all page processing tasks
-            futures = [executor.submit(process_page, i)
-                       for i in range(total_pages)]
+            with Progress(
+                SpinnerColumn(),
+                TextColumn(
+                    "[bold blue]Processing Pages", justify="right"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeRemainingColumn(),
+            ) as progress:
+                main_task = progress.add_task(
+                    "Total Progress", total=total_pages)
 
-            # Wait for all tasks to complete
-            completed_pages = 0
-            for future in as_completed(futures):
-                try:
-                    page_num = future.result()  # This will raise any exceptions that occurred
-                    completed_pages += 1
-                    print(
-                        f"✓ Completed page {page_num + 1} ({completed_pages}/{total_pages})")
-                except Exception as e:
-                    print(f"Error processing page: {e}")
+                futures = [executor.submit(process_page, i)
+                           for i in range(total_pages)]
+
+                for future in as_completed(futures):
+                    try:
+                        page_num = future.result()
+                        progress.update(
+                            main_task, advance=1, description=f"✓ Completed page {page_num + 1}")
+                    except Exception as e:
+                        print(f"Error processing page: {e}")
+                        progress.update(main_task, advance=1)
 
     print("All pages processed successfully!")
 
