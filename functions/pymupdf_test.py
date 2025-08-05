@@ -4,6 +4,9 @@ import pymupdf  # PyMuPDF
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ai_chat import AI
+import asyncio
+from googletrans import Translator
+from deep_translator import GoogleTranslator
 
 load_dotenv()
 
@@ -11,18 +14,65 @@ input_filepath = os.environ.get("INPUT_FILEPATH")
 output_dir = os.environ.get("OUTPUT_DIR", "output")
 use_offline_translation = os.environ.get(
     "USE_OFFLINE_TRANSLATION", "false").lower() == "true"
+rotation = int(os.environ.get(
+    "ROTATION_VALUE", "0"))
 debug_single_page = os.environ.get(
     "DEBUG_SINGLE_PAGE", "false").lower() == "true"
 # Convert to 0-based index
+# words = page.get_textpage().extractWORDS()
 debug_page_number = int(os.environ.get("DEBUG_PAGE_NUMBER", "1")) - 1
 
 
 def contains_japanese(text):
     """Check if text contains Japanese characters (Hiragana, Katakana, or Kanji)."""
     # https://stackoverflow.com/questions/6787716/regular-expression-for-japanese-characters#comment31157097_10508813
-    # japanese_pattern = re.compile(r'[一-龠ぁ-ゔァ-ヴーａ-ｚＡ-Ｚ０-９々〆〤]+')
-    # return bool(japanese_pattern.search(text))
-    return True
+    japanese_pattern = re.compile(r'[一-龠ぁ-ゔァ-ヴーａ-ｚＡ-Ｚ０-９々〆〤]+')
+    return bool(japanese_pattern.search(text))
+
+
+def extract_text_from_dict(text_dict):
+    """Extract text from PyMuPDF text dictionary format."""
+    text_content = []
+
+    if "blocks" in text_dict:
+        for block in text_dict["blocks"]:
+            if "lines" in block:
+                for line in block["lines"]:
+                    if "spans" in line:
+                        for span in line["spans"]:
+                            if "text" in span:
+                                text_content.append(span["text"])
+                        text_content.append("\n")
+
+    return "".join(text_content)
+
+
+def extract_positioned_text_from_dict(text_dict):
+    """Extract text with positioning information from PyMuPDF text dictionary format."""
+    positioned_words = []
+
+    if "blocks" in text_dict:
+        for block in text_dict["blocks"]:
+            if "lines" in block:
+                for line in block["lines"]:
+                    if "spans" in line:
+                        for span in line["spans"]:
+                            if "text" in span and span["text"].strip():
+                                # Extract bounding box from span
+                                bbox = span.get("bbox", [0, 0, 0, 0])
+                                text = span["text"]
+
+                                # Create word format compatible with extractWORDS:
+                                # (x0, y0, x1, y1, text, block_no, line_no, word_no)
+                                positioned_word = (
+                                    # x0, y0, x1, y1
+                                    bbox[0], bbox[1], bbox[2], bbox[3],
+                                    text,  # text content
+                                    0, 0  # block_no, line_no (simplified)
+                                )
+                                positioned_words.append(positioned_word)
+
+    return positioned_words
 
 
 def translate_offline(text):
@@ -36,15 +86,12 @@ def translate_offline(text):
         clean_text = text.strip()
         print(f"Clean text for translation: '{clean_text[:50]}...'")
 
-        # Try to import and use Google Translate offline library
-        from googletrans import Translator
         translator = Translator()
 
         # Handle both sync and async versions of googletrans
         result = translator.translate(clean_text, src='ja', dest='en')
 
         # Check if result is a coroutine (async version)
-        import asyncio
         if asyncio.iscoroutine(result):
             # For async version, we need to run in an event loop
             try:
@@ -70,7 +117,7 @@ def translate_offline(text):
         print("Warning: googletrans not installed. Install with 'pip install googletrans==4.0.0rc1'")
         # Try alternative: deep-translator
         try:
-            from deep_translator import GoogleTranslator
+
             translator = GoogleTranslator(source='ja', target='en')
             translated = translator.translate(clean_text)
             print(f"Deep translator result: '{translated[:50]}...'")
@@ -116,27 +163,35 @@ def translate_japanese_text(text, ai_instance):
             return translate_offline(text)
 
 
-def process_block(block, page, cover_ocg_xref, translate_ocg_xref, ai_instance, block_index, total_blocks, page_number):
+def process_block(words, page, translate_ocg_xref, ai_instance, block_index, total_words, page_number):
     """Process a single text block."""
     print(
-        f"Page {page_number + 1}: processing block {block_index}/{total_blocks}")
+        f"Page {page_number + 1}: processing block {block_index}/{total_words}")
 
     # The bounding box is the first element
-    bbox = block[:4]
+    bbox = words[:4]
 
     # Extract text from the block (block[4] contains the text)
-    original_text = block[4] if len(block) > 4 else ""
-
+    # original_text = block[4] if len(block) > 4 else ""
+    original_text = words[4]
     # Draw a white rectangle with a green outline
-    page.draw_rect(
-        bbox,
-        color=(0, 1, 0),  # Green outline
-        fill=(1, 1, 1),   # White fill
-        width=0.5,        # Outline width
-        overlay=True,      # Draw on top of existing content
-        oc=cover_ocg_xref
-    )
+    # page.draw_rect(
+    #     bbox,
+    #     color=(1, 0, 0),  # Red outline
+    #     width=0.5,        # Outline width
+    #     overlay=True,      # Draw on top of existing content
+    #     oc=translate_ocg_xref
+    # )
     # Try to fix encoding issues
+    # Save all extracted words into a .txt file
+    output_txt_path = os.path.join(
+        output_dir, f"extracted_words_page_{page_number + 1:03d}.txt")
+    os.makedirs(output_dir, exist_ok=True)
+
+    with open(output_txt_path, 'a', encoding='utf-8') as txt_file:
+        txt_file.write(original_text + '\n')
+
+    print(original_text)
     if original_text:
         try:
             # Try to encode/decode to fix potential encoding issues
@@ -160,6 +215,14 @@ def process_block(block, page, cover_ocg_xref, translate_ocg_xref, ai_instance, 
 
     # Debug: Print original text
     if original_text.strip():
+        page.draw_rect(
+            bbox,
+            color=(0, 1, 0),  # Green outline
+            fill=(1, 1, 1),   # White fill
+            width=0.5,        # Outline width
+            overlay=True,      # Draw on top of existing content
+            oc=translate_ocg_xref
+        )
         print(f"Original text: '{original_text[:100]}...'")
         print(f"Contains Japanese: {contains_japanese(original_text)}")
 
@@ -173,8 +236,6 @@ def process_block(block, page, cover_ocg_xref, translate_ocg_xref, ai_instance, 
         * {
             color: black;
             font-family: Arial, sans-serif;
-            font-size: 12px;
-            line-height: 1.2;
         }
         """
 
@@ -189,7 +250,7 @@ def process_block(block, page, cover_ocg_xref, translate_ocg_xref, ai_instance, 
             display_text,
             css=css_style,
             scale_low=0,  # Allow unlimited scaling down to fit
-            rotate=0,
+            rotate=rotation,
             oc=translate_ocg_xref,
             opacity=1,
             overlay=True
@@ -203,39 +264,90 @@ def process_page(page_number):
     # Initialize AI instance for this thread
     ai_instance = AI()
 
-    # Open the document
+    # Open the original document to get the page
     doc = pymupdf.open(input_filepath)
-    page = doc.load_page(page_number)
 
-    # Create OCG layers for this page
-    cover_ocg_xref = doc.add_ocg(f"Cover Boxes Page {page_number + 1}")
-    translate_ocg_xref = doc.add_ocg(
-        f"Translation Text Page {page_number + 1}")
+    # Create a new single-page document
+    single_page_doc = pymupdf.open()
+    single_page_doc.insert_pdf(doc, from_page=page_number, to_page=page_number)
+    doc.close()  # Close original document, we only need the new one now
+
+    # Load the page from the new document
+    page = single_page_doc.load_page(0)
+
+    # Create OCG layers directly in the new document for this page
+    translate_ocg_xref = single_page_doc.add_ocg(
+        f"Translation Text Page {page_number + 1}",
+        on=True  # Make translation layer visible by default
+    )
 
     print(f'Processing page {page_number + 1}...')
-    # Extract text blocks using different methods
-    blocks = page.get_textpage().extractBLOCKS()
-    total_blocks = len(blocks)
 
-    # Try alternative text extraction if we get corrupted text
-    if total_blocks > 0:
-        sample_text = blocks[0][4] if len(blocks[0]) > 4 else ""
-        if '�' in sample_text:
+    # Step 1: Extract readable text using the working method
+    try:
+        full_text = page.get_text()
+        print(
+            f"Successfully extracted {len(full_text)} characters using simple extraction")
+
+        # Save the full extracted text for reference
+        output_txt_path = os.path.join(
+            output_dir, f"extracted_text_page_{page_number + 1:03d}.txt")
+        os.makedirs(output_dir, exist_ok=True)
+
+        with open(output_txt_path, 'w', encoding='utf-8') as txt_file:
+            txt_file.write(full_text)
+
+    except Exception as e:
+        print(f"Text extraction failed: {e}")
+        full_text = ""
+
+    # Step 2: Get positioning information using extractWORDS (even if corrupted)
+    try:
+        words_with_positions = page.get_textpage().extractWORDS()
+        print(f"Found {len(words_with_positions)} positioned word blocks")
+    except Exception as e:
+        print(f"Word extraction failed: {e}")
+        words_with_positions = []
+
+    # Step 3: Try to map readable text to positions using dictionary method
+    readable_words = []
+
+    if full_text.strip() and words_with_positions:
+        try:
+            # Get text with detailed positioning using dictionary method
+            text_dict = page.get_text("dict")
+            readable_words = extract_positioned_text_from_dict(text_dict)
             print(
-                "Warning: Detected corrupted text, trying alternative extraction method...")
-            # Try alternative extraction method
-            try:
-                text_dict = page.get_text("dict")
-                # This might give us better text extraction
-                print("Using alternative text extraction method")
-            except Exception as e:
-                print(f"Alternative extraction failed: {e}")
+                f"Successfully mapped {len(readable_words)} readable text blocks with positions")
 
-    # Debug: Print first few blocks to see what we're getting
+        except Exception as e:
+            print(f"Dictionary extraction failed: {e}")
+
+    # Step 4: Fallback strategy - use the positioned words even if some are corrupted
+    if not readable_words and words_with_positions:
+        print("Using fallback: processing positioned words even if some text is corrupted")
+        # Filter out completely corrupted words (all replacement characters)
+        words = []
+        for word_data in words_with_positions:
+            if len(word_data) > 4:
+                text = word_data[4]
+                # Only skip if the text is completely corrupted
+                if text and not (len(text.replace('�', '').strip()) == 0):
+                    words.append(word_data)
+                else:
+                    # Skip completely corrupted words but keep track
+                    continue
+        print(f"Filtered to {len(words)} words with some readable content")
+    else:
+        words = readable_words if readable_words else words_with_positions
+
+    total_words = len(words)
+
+    # Debug: Print first few words to see what we're getting
     if debug_single_page or page_number == 0:  # Enhanced debugging for single page mode or first page
-        print(f"Debug: Found {total_blocks} blocks on page {page_number + 1}")
-        # Show first 5 blocks in debug mode
-        for i, block in enumerate(blocks[:5]):
+        print(f"Debug: Found {total_words} words on page {page_number + 1}")
+        # Show first 5 words in debug mode
+        for i, block in enumerate(words[:5]):
             print(f"Block {i}: {block}")
             # Show the raw bytes to diagnose encoding issues
             if len(block) > 4:
@@ -248,53 +360,46 @@ def process_page(page_number):
                     except:
                         print("  Cannot encode text to bytes")
 
-    # Process blocks concurrently within this page
-    # Limit concurrent blocks
-    max_block_workers = min(8, len(blocks), os.cpu_count())
+    # Process words concurrently within this page
+    # Limit concurrent words
 
-    if total_blocks > 0:
-        with ThreadPoolExecutor(max_workers=max_block_workers) as block_executor:
+    if total_words > 0:
+        with ThreadPoolExecutor() as block_executor:
             # Submit all block processing tasks
             block_futures = [
                 block_executor.submit(
                     process_block,
                     block,
                     page,
-                    cover_ocg_xref,
                     translate_ocg_xref,
                     ai_instance,
                     idx,
-                    total_blocks,
+                    total_words,
                     page_number
                 )
-                for idx, block in enumerate(blocks)
+                for idx, block in enumerate(words)
             ]
 
-            # Wait for all blocks to complete
-            completed_blocks = 0
+            # Wait for all words to complete
+            completed_words = 0
             for future in as_completed(block_futures):
                 try:
                     future.result()  # This will raise any exceptions that occurred
-                    completed_blocks += 1
-                    if completed_blocks % 50 == 0:  # Progress update every 50 blocks
+                    completed_words += 1
+                    if completed_words % 50 == 0:  # Progress update every 50 words
                         print(
-                            f"Page {page_number + 1}: completed {completed_blocks}/{total_blocks} blocks")
+                            f"Page {page_number + 1}: completed {completed_words}/{total_words} words")
                 except Exception as e:
                     print(
                         f"Error processing block on page {page_number + 1}: {e}")
 
-    # Save this page to a temporary file
-    single_page_doc = pymupdf.open()
-    single_page_doc.insert_pdf(doc, from_page=page_number, to_page=page_number)
-
-    # Create output directory if it doesn't exist
+    # Save the modified single-page document
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(
         output_dir, f"processed_page_{page_number + 1:03d}.pdf")
 
-    single_page_doc.save(output_path)
+    single_page_doc.save(output_path, garbage=4, deflate=True, clean=True)
     single_page_doc.close()
-    doc.close()
 
     print(f"Completed page {page_number + 1}, saved to {output_path}")
     return page_number
@@ -328,13 +433,18 @@ def main():
     else:
         print(f"Processing {total_pages} pages with multi-threading...")
         print(f"Translation method: {translation_method}")
-        print(f"Concurrent processing: Pages AND blocks within each page")
+        print(f"Concurrent processing: Pages AND words within each page")
 
         # Use ThreadPoolExecutor for parallel processing
-        max_workers = min(4, os.cpu_count())  # Limit to 4 threads or CPU count
-        print(f"Using {max_workers} concurrent page workers")
+        # https://stackoverflow.com/a/40505434
+        # If max_workers is None or not given, it will default to the number of processors on the machine,
+        # multiplied by 5, assuming that ThreadPoolExecutor is often used to overlap I/O instead of CPU work
+        # and the number of workers should be higher than the number of workers for ProcessPoolExecutor.
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # max_workers = min(4, os.cpu_count())  # Limit to 4 threads or CPU count
+        print(f"Using ??? concurrent page workers")
+
+        with ThreadPoolExecutor() as executor:
             # Submit all page processing tasks
             futures = [executor.submit(process_page, i)
                        for i in range(total_pages)]
