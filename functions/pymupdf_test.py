@@ -27,7 +27,34 @@ debug_single_page = os.environ.get(
     "DEBUG_SINGLE_PAGE", "false").lower() == "true"
 # Convert to 0-based index
 # words = page.get_textpage().extractWORDS()
-debug_page_number = int(os.environ.get("DEBUG_PAGE_NUMBER", "1")) - 1
+page_selection = os.environ.get("DEBUG_PAGE_NUMBER", "")
+
+
+def parse_page_numbers(page_str):
+    """Parse a string like '1;5;10-15' into a list of 0-indexed page numbers."""
+    pages = set()
+    if not page_str:
+        return []
+    parts = page_str.split(';')
+    for part in parts:
+        part = part.strip()
+        if '-' in part:
+            try:
+                start, end = map(int, part.split('-'))
+                if start > end:
+                    # Handle descending ranges like 20-10
+                    start, end = end, start
+                # User provides 1-based pages, convert to 0-based indices
+                pages.update(range(start - 1, end))
+            except ValueError:
+                print(f"Warning: Invalid range '{part}', skipping.")
+        else:
+            try:
+                # User provides 1-based page, convert to 0-based index
+                pages.add(int(part) - 1)
+            except ValueError:
+                print(f"Warning: Invalid page number '{part}', skipping.")
+    return sorted(list(pages))
 
 
 def contains_japanese(text):
@@ -223,16 +250,30 @@ def process_block(words, page, translate_ocg_xref, ai_instance, block_index, tot
 
     # Debug: Print original text
     if original_text.strip():
-        page.draw_rect(
-            bbox,
-            color=(0, 1, 0),  # Green outline
-            fill=(1, 1, 1),   # White fill
-            width=0.5,        # Outline width
-            overlay=True,      # Draw on top of existing content
-            oc=translate_ocg_xref
-        )
+
         print(f"Original text: '{original_text[:100]}...'")
-        print(f"Contains Japanese: {contains_japanese(original_text)}")
+        contains_japanese_bool = contains_japanese(original_text)
+        print(f"Contains Japanese: {contains_japanese_bool}")
+
+        if contains_japanese_bool:
+            page.draw_rect(
+                bbox,
+                color=(0, 1, 0),  # Green outline
+                fill=(1, 1, 1),   # White fill
+                width=0.5,        # Outline width
+                overlay=True,      # Draw on top of existing content
+                oc=translate_ocg_xref
+            )
+        else:
+            page.draw_rect(
+                bbox,
+                color=(1, 0, 0),  # Red outline
+                width=0.5,        # Outline width
+                overlay=True,      # Draw on top of existing content
+                oc=translate_ocg_xref
+            )
+
+            return block_index
 
         # Translate Japanese text if detected
         translated_text = translate_japanese_text(original_text, ai_instance)
@@ -425,50 +466,60 @@ def main():
     doc.close()
 
     translation_method = "offline" if use_offline_translation else "AI"
+    pages_to_process = parse_page_numbers(page_selection)
 
-    if debug_single_page:
-        if debug_page_number >= total_pages:
-            print(
-                f"Error: DEBUG_PAGE_NUMBER ({debug_page_number + 1}) is greater than total pages ({total_pages})")
+    if not pages_to_process:
+        # If no pages are specified in debug mode, or if not in debug mode, process all pages.
+        pages_to_process = range(total_pages)
+
+    # Filter out pages that are out of bounds
+    valid_pages = [p for p in pages_to_process if p < total_pages]
+    if len(valid_pages) != len(pages_to_process):
+        print(
+            f"Warning: Some specified pages are out of the valid range (1-{total_pages}).")
+        if not valid_pages:
+            print("Error: No valid pages to process.")
             return
 
+    if debug_single_page:
         print(
-            f"DEBUG MODE: Processing only page {debug_page_number + 1} of {total_pages}")
+            f"DEBUG MODE: Processing pages: {[p + 1 for p in valid_pages]}")
         print(f"Translation method: {translation_method}")
-
-        # Process only the specified page
-        try:
-            process_page(debug_page_number)
-            print(f"✓ Completed debug page {debug_page_number + 1}")
-        except Exception as e:
-            print(f"Error processing debug page: {e}")
+        # Set total for progress bar
+        total_pages = len(valid_pages)
     else:
-        print(f"Processing {total_pages} pages...")
+        # Only use all pages if no specific pages were requested
+        if not page_selection:
+            valid_pages = range(total_pages)
+        print(
+            f"Processing {len(valid_pages)} pages: {[p + 1 for p in valid_pages] if page_selection else 'all pages'}...")
         print(f"Translation method: {translation_method}")
+        # Update total_pages for progress bar
+        total_pages = len(valid_pages)
 
-        with ThreadPoolExecutor() as executor:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn(
-                    "[bold blue]Processing Pages", justify="right"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                TimeRemainingColumn(),
-            ) as progress:
-                main_task = progress.add_task(
-                    "Total Progress", total=total_pages)
+    with ThreadPoolExecutor() as executor:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn(
+                "[bold blue]Processing Pages", justify="right"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeRemainingColumn(),
+        ) as progress:
+            main_task = progress.add_task(
+                "Total Progress", total=total_pages)
 
-                futures = [executor.submit(process_page, i)
-                           for i in range(total_pages)]
+            futures = [executor.submit(process_page, i)
+                       for i in valid_pages]
 
-                for future in as_completed(futures):
-                    try:
-                        page_num = future.result()
-                        progress.update(
-                            main_task, advance=1, description=f"✓ Completed page {page_num + 1}")
-                    except Exception as e:
-                        print(f"Error processing page: {e}")
-                        progress.update(main_task, advance=1)
+            for future in as_completed(futures):
+                try:
+                    page_num = future.result()
+                    progress.update(
+                        main_task, advance=1, description=f"✓ Completed page {page_num + 1}")
+                except Exception as e:
+                    print(f"Error processing page: {e}")
+                    progress.update(main_task, advance=1)
 
     print("All pages processed successfully!")
 
