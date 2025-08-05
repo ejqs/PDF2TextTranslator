@@ -28,6 +28,7 @@ debug_single_page = os.environ.get(
 # Convert to 0-based index
 # words = page.get_textpage().extractWORDS()
 page_selection = os.environ.get("DEBUG_PAGE_NUMBER", "")
+min_blocks_threshold = int(os.environ.get("MIN_BLOCKS_THRESHOLD", "5"))
 
 
 def parse_page_numbers(page_str):
@@ -107,6 +108,35 @@ def extract_positioned_text_from_dict(text_dict):
                                 positioned_words.append(positioned_word)
 
     return positioned_words
+
+
+def extract_text_with_ocr(page):
+    """Extract text using OCR when regular text extraction fails or returns insufficient content."""
+    try:
+        print("Attempting OCR text extraction...")
+
+        # Use PyMuPDF's OCR functionality
+        ocr_textpage = page.get_textpage_ocr(flags=0,
+                                             language='jpn', full=True, dpi=300)
+
+        if ocr_textpage:
+            # Extract text using the OCR textpage
+            ocr_text = ocr_textpage.extractText()
+
+            # Extract words with positions using the OCR textpage
+            ocr_words = ocr_textpage.extractWORDS()
+
+            print(
+                f"OCR extracted {len(ocr_text)} characters and {len(ocr_words)} word blocks")
+
+            return ocr_text, ocr_words
+        else:
+            print("OCR textpage creation failed")
+            return "", []
+
+    except Exception as e:
+        print(f"OCR extraction failed: {e}")
+        return "", []
 
 
 def translate_offline(text):
@@ -293,13 +323,17 @@ def process_block(words, page, translate_ocg_xref, ai_instance, block_index, tot
 
         # Debug: Print what we're actually displaying
         print(f"Display text: '{display_text[:100]}...'")
+        # Determine rotation based on bbox dimensions
+        bbox_width = bbox[2] - bbox[0]
+        bbox_height = bbox[3] - bbox[1]
+        dynamic_rotation = 0 + rotation if bbox_height < bbox_width else 90 + rotation
 
         page.insert_htmlbox(
             bbox,
             display_text,
             css=css_style,
             scale_low=0,  # Allow unlimited scaling down to fit
-            rotate=rotation,
+            rotate=dynamic_rotation,
             oc=translate_ocg_xref,
             opacity=1,
             overlay=True
@@ -391,6 +425,32 @@ def process_page(page_number):
         words = readable_words if readable_words else words_with_positions
 
     total_words = len(words)
+
+    # Step 5: OCR fallback if we have fewer blocks than the minimum threshold
+    if total_words < min_blocks_threshold:
+        print(
+            f"Found only {total_words} text blocks (below threshold of {min_blocks_threshold}), attempting OCR...")
+
+        ocr_text, ocr_words = extract_text_with_ocr(page)
+
+        if ocr_words and len(ocr_words) > total_words:
+            print(
+                f"OCR extraction successful: {len(ocr_words)} blocks found vs {total_words} from regular extraction")
+            words = ocr_words
+            total_words = len(words)
+
+            # Update the full text with OCR results if it's better
+            if ocr_text and len(ocr_text.strip()) > len(full_text.strip()):
+                full_text = ocr_text
+                # Save the OCR extracted text for reference
+                output_txt_path = os.path.join(
+                    output_dir, f"extracted_text_page_{page_number + 1:03d}_ocr.txt")
+                with open(output_txt_path, 'w', encoding='utf-8') as txt_file:
+                    txt_file.write(ocr_text)
+                print(f"OCR text saved to {output_txt_path}")
+        else:
+            print(
+                f"OCR did not improve results: {len(ocr_words) if ocr_words else 0} OCR blocks vs {total_words} regular blocks")
 
     # Debug: Print first few words to see what we're getting
     if debug_single_page or page_number == 0:  # Enhanced debugging for single page mode or first page
@@ -485,6 +545,8 @@ def main():
         print(
             f"DEBUG MODE: Processing pages: {[p + 1 for p in valid_pages]}")
         print(f"Translation method: {translation_method}")
+        print(
+            f"Minimum blocks threshold for OCR fallback: {min_blocks_threshold}")
         # Set total for progress bar
         total_pages = len(valid_pages)
     else:
@@ -494,6 +556,8 @@ def main():
         print(
             f"Processing {len(valid_pages)} pages: {[p + 1 for p in valid_pages] if page_selection else 'all pages'}...")
         print(f"Translation method: {translation_method}")
+        print(
+            f"Minimum blocks threshold for OCR fallback: {min_blocks_threshold}")
         # Update total_pages for progress bar
         total_pages = len(valid_pages)
 
