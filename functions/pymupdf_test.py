@@ -1,3 +1,7 @@
+from pathlib import Path
+import zipfile
+import tempfile
+from datetime import datetime
 import os
 import re
 import argparse
@@ -5,9 +9,8 @@ import asyncio
 import pymupdf  # PyMuPDF
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from ai_chat import AI
-from googletrans import Translator
-from deep_translator import GoogleTranslator
+# Lazy imports for AI / translation libs to reduce packaging issues
+# (googletrans, deep_translator, openai client loaded only when needed)
 from rich.progress import (
     Progress,
     BarColumn,
@@ -17,6 +20,8 @@ from rich.progress import (
 )
 
 load_dotenv()
+
+# ---- Gradio integration helper additions (non-breaking) ----
 
 input_filepath = os.environ.get("INPUT_FILEPATH")
 output_dir = os.environ.get("OUTPUT_DIR", "output")
@@ -180,28 +185,28 @@ def extract_text_with_ocr(page):
 
 
 def translate_offline(text):
-    """Translate Japanese text using offline translation method."""
+    """Translate Japanese text using offline translation method.
+
+    Attempts googletrans first (if installed), then deep_translator.
+    All imports are lazy so packaging (PyInstaller) won't fail if libs are missing.
+    """
+    # Quick validation
+    if not text or not text.strip():
+        return text
+
+    clean_text = text.strip()
+    print(f"Clean text for translation: '{clean_text[:50]}...'")
+
+    # Attempt googletrans
     try:
-        # First, check if the text is actually readable
-        if not text or not text.strip():
-            return text
-
-        # Clean the text - remove any problematic characters
-        clean_text = text.strip()
-        print(f"Clean text for translation: '{clean_text[:50]}...'")
-
+        from googletrans import Translator  # type: ignore
         translator = Translator()
-
-        # Handle both sync and async versions of googletrans
         result = translator.translate(clean_text, src='ja', dest='en')
-
-        # Check if result is a coroutine (async version)
+        # Handle potential coroutine in some versions
         if asyncio.iscoroutine(result):
-            # For async version, we need to run in an event loop
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    # If loop is already running, create a new task
                     import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor() as executor:
                         future = executor.submit(
@@ -210,39 +215,29 @@ def translate_offline(text):
                 else:
                     result = loop.run_until_complete(result)
             except RuntimeError:
-                # If no event loop, create one
                 result = asyncio.run(result)
-
         translated = result.text if hasattr(result, 'text') else str(result)
         print(f"Google Translate result: '{translated[:50]}...'")
         return translated
-
     except ImportError:
-        print("Warning: googletrans not installed. Install with 'pip install googletrans==4.0.0rc1'")
-        # Try alternative: deep-translator
-        try:
-
-            translator = GoogleTranslator(source='ja', target='en')
-            translated = translator.translate(clean_text)
-            print(f"Deep translator result: '{translated[:50]}...'")
-            return translated
-        except ImportError:
-            print(
-                "Alternative: Install deep-translator with 'pip install deep-translator'")
-            return text
+        print("googletrans not available, falling back to deep-translator if present")
     except Exception as e:
-        print(f"Offline translation error: {e}")
-        print(f"Error type: {type(e)}")
-        # Try alternative method
-        try:
-            from deep_translator import GoogleTranslator
-            translator = GoogleTranslator(source='ja', target='en')
-            translated = translator.translate(clean_text)
-            print(f"Fallback deep translator result: '{translated[:50]}...'")
-            return translated
-        except:
-            print("All translation methods failed, returning original text")
-            return text
+        print(f"googletrans translation error: {e}")
+
+    # Attempt deep_translator
+    try:
+        from deep_translator import GoogleTranslator  # type: ignore
+        translator = GoogleTranslator(source='ja', target='en')
+        translated = translator.translate(clean_text)
+        print(f"Deep translator result: '{translated[:50]}...'")
+        return translated
+    except ImportError:
+        print("deep-translator not installed; offline translation unavailable")
+    except Exception as e:
+        print(f"deep-translator error: {e}")
+
+    print("All offline translation methods failed; returning original text")
+    return text
 
 
 def translate_japanese_text(text, ai_instance):
@@ -388,10 +383,20 @@ def process_block(words, page, translate_ocg_xref, ai_instance, block_index, tot
 
 def process_page(page_number):
     """Process a single page and export it as a separate PDF."""
+    # Need global declaration before first use to allow fallback mutation
+    global use_offline_translation
     # Initialize AI instance only when using AI translation
     ai_instance = None
     if not use_offline_translation:
-        ai_instance = AI()
+        try:
+            from ai_chat import AI  # lazy import
+            ai_instance = AI()
+        except Exception as e:
+            print(
+                f"Failed to initialize AI translation ({e}); falling back to offline mode")
+            ai_instance = None
+            # Force offline for remainder of processing
+            use_offline_translation = True
 
     # Open the original document to get the page
     doc = pymupdf.open(input_filepath)
@@ -672,3 +677,116 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------- Library Wrapper For Gradio -----------------
+def translate_pdf(
+    pdf_path: str | os.PathLike,
+    pages: str = "",
+    use_offline: bool | None = None,
+    rotation_offset: int | None = None,
+    min_blocks: int | None = None,
+    debug: bool = False,
+    ocr_lang: str | None = None,
+    output_base: str | os.PathLike | None = None,
+) -> dict:
+    """Programmatic wrapper around the script's page processing logic.
+
+    Parameters
+    ----------
+    pdf_path: path to input PDF file
+    pages: page selection string like '1;5;10-12' (1-based). Blank => all pages
+    use_offline: override offline / AI translation (None => keep existing setting)
+    rotation_offset: degrees to add to auto rotation logic
+    min_blocks: override OCR trigger threshold
+    debug: enable verbose debug_single_page behaviour
+    ocr_lang: override OCR language
+    output_base: directory root to place output (a session subfolder will be created)
+
+    Returns
+    -------
+    dict with keys: page_files (list[str]), merged_pdf_path, zip_path, output_dir
+    """
+    global input_filepath, output_dir, use_offline_translation, rotation
+    global debug_single_page, page_selection, min_blocks_threshold, ocr_language
+
+    # ---- Configure session specific directories ----
+    pdf_path = str(pdf_path)
+    if not os.path.exists(pdf_path):
+        raise FileNotFoundError(f"Input PDF not found: {pdf_path}")
+
+    session_root = Path(output_base) if output_base else Path("output")
+    session_dir = session_root / \
+        f"gradio_session_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    # Update module level state (NOTE: not thread-safe across concurrent calls)
+    input_filepath = pdf_path
+    output_dir = str(session_dir)
+    if use_offline is not None:
+        use_offline_translation = bool(use_offline)
+    if rotation_offset is not None:
+        rotation = int(rotation_offset)
+    if min_blocks is not None:
+        min_blocks_threshold = int(min_blocks)
+    if ocr_lang:
+        ocr_language = ocr_lang
+    debug_single_page = debug
+    page_selection = pages or ""
+
+    # Reuse logic from main(), trimmed for API usage
+    import pymupdf  # local import to avoid issues if module unused elsewhere
+    doc = pymupdf.open(input_filepath)
+    total_pages = doc.page_count
+    doc.close()
+
+    pages_to_process = parse_page_numbers(page_selection)
+    if not pages_to_process:
+        pages_to_process = range(total_pages)
+    valid_pages = [p for p in pages_to_process if p < total_pages]
+    if not valid_pages:
+        raise ValueError("No valid pages selected.")
+
+    # Process pages sequentially here (less contention inside Gradio); could parallelize if desired
+    produced_files: list[str] = []
+    for p in valid_pages:
+        try:
+            process_page(p)
+            produced_files.append(
+                str(Path(output_dir) / f"processed_page_{p + 1:03d}.pdf"))
+        except Exception as e:
+            print(f"Failed processing page {p + 1}: {e}")
+
+    # Merge pages into single PDF
+    merged_pdf_path = Path(output_dir) / "translated_pages_merged.pdf"
+    try:
+        merged_doc = pymupdf.open()
+        for pf in produced_files:
+            if os.path.exists(pf):
+                tmp_doc = pymupdf.open(pf)
+                merged_doc.insert_pdf(tmp_doc)
+                tmp_doc.close()
+        if len(merged_doc) > 0:
+            merged_doc.save(str(merged_pdf_path))
+        merged_doc.close()
+    except Exception as e:
+        print(f"Failed to merge PDFs: {e}")
+        merged_pdf_path = None
+
+    # Zip individual pages
+    zip_path = Path(output_dir) / "translated_pages.zip"
+    try:
+        with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+            for pf in produced_files:
+                if os.path.exists(pf):
+                    zf.write(pf, Path(pf).name)
+    except Exception as e:
+        print(f"Failed to create zip: {e}")
+        zip_path = None
+
+    return {
+        "page_files": produced_files,
+        "merged_pdf_path": str(merged_pdf_path) if merged_pdf_path else None,
+        "zip_path": str(zip_path) if zip_path else None,
+        "output_dir": str(output_dir),
+    }

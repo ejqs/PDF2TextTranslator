@@ -2,7 +2,7 @@
 .env
 input/
 output/
-
+.gradio/
 # Python-generated files
 __pycache__/
 *.py[oc]
