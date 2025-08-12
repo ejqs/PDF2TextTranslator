@@ -256,6 +256,10 @@ def translate_japanese_text(text, ai_instance):
     else:
         try:
             print(f"Using AI translation for: {text[:50]}...")
+            # Lazy-init AI if not provided to avoid requiring OPENAI_API_KEY in offline runs
+            if ai_instance is None:
+                from ai_chat import AI as _AI
+                ai_instance = _AI()
             translated = ai_instance.chatgpt(
                 instructions="Translate the following Japanese text to English. If the text is already in English or contains no Japanese, return it unchanged:",
                 input_text=text
@@ -384,8 +388,10 @@ def process_block(words, page, translate_ocg_xref, ai_instance, block_index, tot
 
 def process_page(page_number):
     """Process a single page and export it as a separate PDF."""
-    # Initialize AI instance for this thread
-    ai_instance = AI()
+    # Initialize AI instance only when using AI translation
+    ai_instance = None
+    if not use_offline_translation:
+        ai_instance = AI()
 
     # Open the original document to get the page
     doc = pymupdf.open(input_filepath)
