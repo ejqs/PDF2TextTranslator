@@ -1,10 +1,11 @@
 import os
 import re
+import argparse
+import asyncio
 import pymupdf  # PyMuPDF
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ai_chat import AI
-import asyncio
 from googletrans import Translator
 from deep_translator import GoogleTranslator
 from rich.progress import (
@@ -29,6 +30,45 @@ debug_single_page = os.environ.get(
 # words = page.get_textpage().extractWORDS()
 page_selection = os.environ.get("DEBUG_PAGE_NUMBER", "")
 min_blocks_threshold = int(os.environ.get("MIN_BLOCKS_THRESHOLD", "5"))
+# Optional OCR language (not strictly required by current OCR call which uses hardcoded 'jpn')
+ocr_language = os.environ.get("OCR_LANGUAGE", "jpn")
+
+
+def _parse_bool(value: str | bool | None, default: bool) -> bool:
+    """Parse booleans from CLI/env-friendly values."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
+def _apply_cli_overrides(args):
+    """Apply CLI overrides to module-level config variables."""
+    global input_filepath, output_dir, use_offline_translation, rotation
+    global debug_single_page, page_selection, min_blocks_threshold, ocr_language
+
+    if getattr(args, "input", None):
+        input_filepath = args.input
+    if getattr(args, "output", None):
+        output_dir = args.output
+    if getattr(args, "use_offline_translation", None) is not None:
+        use_offline_translation = _parse_bool(
+            args.use_offline_translation, use_offline_translation)
+    if getattr(args, "rotation", None) is not None:
+        rotation = int(args.rotation)
+    if getattr(args, "debug_single_page", None) is not None:
+        debug_single_page = _parse_bool(
+            args.debug_single_page, debug_single_page)
+    # Allow either --pages or --debug-page-number aliases
+    if getattr(args, "pages", None):
+        page_selection = args.pages
+    if getattr(args, "debug_page_number", None):
+        page_selection = args.debug_page_number
+    if getattr(args, "min_blocks_threshold", None) is not None:
+        min_blocks_threshold = int(args.min_blocks_threshold)
+    if getattr(args, "ocr_language", None):
+        ocr_language = args.ocr_language
 
 
 def parse_page_numbers(page_str):
@@ -520,6 +560,42 @@ def process_page(page_number):
 
 def main():
     """Main function to process pages with multi-threading."""
+    # CLI arguments (override env defaults)
+    parser = argparse.ArgumentParser(
+        description="PDF -> text -> translate -> PDF overlay")
+    parser.add_argument(
+        "--input", "-i", help="Path to input PDF (overrides INPUT_FILEPATH)")
+    parser.add_argument(
+        "--output", "-o", help="Output directory (overrides OUTPUT_DIR)")
+    parser.add_argument("--use-offline-translation", dest="use_offline_translation",
+                        action="store_true", help="Use offline translation instead of AI")
+    parser.add_argument("--use-ai-translation", dest="use_offline_translation", action="store_false",
+                        help="Use AI translation (default if USE_OFFLINE_TRANSLATION not set)")
+    parser.set_defaults(use_offline_translation=None)
+    parser.add_argument("--rotation", type=int,
+                        help="Rotation offset to apply to inserted text (degrees)")
+    parser.add_argument("--debug-single-page", dest="debug_single_page",
+                        action="store_true", help="Enable debug mode for selected pages")
+    parser.add_argument("--no-debug-single-page", dest="debug_single_page",
+                        action="store_false", help="Disable debug mode")
+    parser.set_defaults(debug_single_page=None)
+    parser.add_argument(
+        "--pages", help="Pages to process; e.g. '1;5;10-15' (1-based)")
+    parser.add_argument("--debug-page-number", help="Alias for --pages")
+    parser.add_argument("--min-blocks-threshold", type=int,
+                        help="If found blocks < N, trigger OCR")
+    parser.add_argument(
+        "--ocr-language", help="OCR language (e.g., jpn, eng). Default from OCR_LANGUAGE env")
+
+    args, unknown = parser.parse_known_args()
+    _apply_cli_overrides(args)
+
+    # Require an input file
+    if not input_filepath or not os.path.exists(input_filepath):
+        print("Error: INPUT_FILEPATH not provided or file does not exist.")
+        print("Provide via env (INPUT_FILEPATH) or CLI: --input <path-to-pdf>.")
+        return
+
     # Open the document to get total page count
     doc = pymupdf.open(input_filepath)
     total_pages = doc.page_count
