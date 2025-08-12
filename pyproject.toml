@@ -8,6 +8,9 @@ dependencies = [
     "deep-translator>=1.11.4",
     "googletrans>=4.0.2",
     "openai>=1.98.0",
+    "pillow>=11.3.0",
     "pymupdf>=1.26.3",
+    "pytesseract>=0.3.13",
     "python-dotenv>=1.1.1",
+    "rich>=14.1.0",
 ]
