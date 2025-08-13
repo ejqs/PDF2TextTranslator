@@ -3,6 +3,8 @@
 input/
 output/
 .gradio/
+queued_inputs/
+
 # Python-generated files
 __pycache__/
 *.py[oc]
