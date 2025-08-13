@@ -102,15 +102,20 @@ def fetch_jobs():
         return []
 
 
-with gr.Blocks(title="PDF Translator (Queued)") as app:
-    gr.Markdown('# PDF Translator (Queued)')
+with gr.Blocks(title="PDF Translator") as app:
+    gr.Markdown('# PDF Translator')
+    gr.Markdown(
+        "Useful for large PDFs that cannot be easily translated online.")
     gr.Markdown(
         "Upload a PDF and click Submit. Keep the Job ID shown. Use the Check Progress button to see updates.")
     with gr.Row():
         pdf_input = gr.File(label='PDF', file_types=['.pdf'])
-        pages_input = gr.Textbox(label='Pages', placeholder='e.g. 1;3;5-8')
-    with gr.Accordion('Advanced', open=False):
+        pages_input = gr.Textbox(
+            label='Pages', placeholder='e.g. 1;3;5-8', value="1")
+    gr.Markdown('### Some PDFs or some specific PDF pages may be rotated incorrectly. If that is the case change the rotation offset in the advanced settings.')
+    with gr.Accordion('Advanced Settings', open=False):
         with gr.Row():
+            gr.Markdown('Online translation not yet supported.')
             use_offline = gr.Checkbox(
                 label='Use Offline Translation', value=True)
             rotation = gr.Number(label='Rotation Offset', value=0, precision=0)
@@ -129,8 +134,13 @@ with gr.Blocks(title="PDF Translator (Queued)") as app:
                              minimum=0, maximum=1, value=0, interactive=False)
     status_box = gr.Textbox(label='Status & Messages', lines=4)
     simple_progress = gr.Textbox(label='Page Progress', lines=1)
+    gr.Markdown(
+        '### Merged PDFs download does not yet support translation layers.')
     merged_file = gr.File(label='Merged PDF (Download when ready)')
-    zip_file = gr.File(label='All Pages ZIP (Download when ready)')
+    gr.Markdown(
+        '### ZIP Download contains translation layers that can be toggled on/off using Adobe PDF Reader > Layers > Translation Layers')
+    zip_file = gr.File(
+        label='All Pages ZIP; Contains Translation Layers (Download when ready)')
     output_dir_box = gr.Textbox(
         label='Output Folder (Server)', interactive=False)
 
