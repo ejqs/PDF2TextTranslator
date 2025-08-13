@@ -1068,6 +1068,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "deep-translator" },
     { name = "dev-cmd" },
+    { name = "fastapi" },
     { name = "googletrans" },
     { name = "gradio" },
     { name = "openai" },
@@ -1076,12 +1077,14 @@ dependencies = [
     { name = "pytesseract" },
     { name = "python-dotenv" },
     { name = "rich" },
+    { name = "uvicorn" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "deep-translator", specifier = ">=1.11.4" },
     { name = "dev-cmd", specifier = ">=0.32.3" },
+    { name = "fastapi", specifier = ">=0.112.0" },
     { name = "googletrans", specifier = ">=4.0.2" },
     { name = "gradio", specifier = ">=5.42.0" },
     { name = "openai", specifier = ">=1.98.0" },
@@ -1090,6 +1093,7 @@ requires-dist = [
     { name = "pytesseract", specifier = ">=0.3.13" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
     { name = "rich", specifier = ">=14.1.0" },
+    { name = "uvicorn", specifier = ">=0.30.0" },
 ]
 
 [[package]]

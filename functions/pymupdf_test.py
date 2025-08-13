@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Callable, Optional
 import zipfile
 import tempfile
 from datetime import datetime
@@ -381,7 +382,7 @@ def process_block(words, page, translate_ocg_xref, ai_instance, block_index, tot
     return block_index  # Return for tracking completion
 
 
-def process_page(page_number):
+def process_page(page_number, per_block_cb=None):
     """Process a single page and export it as a separate PDF."""
     # Need global declaration before first use to allow fallback mutation
     global use_offline_translation
@@ -533,10 +534,13 @@ def process_page(page_number):
             page_task = progress.add_task(
                 f"Processing Page {page_number + 1}", total=total_words)
 
-            with ThreadPoolExecutor() as block_executor:
-                block_futures = [
-                    block_executor.submit(
-                        process_block,
+            from threading import Lock
+            done_counter = {"v": 0}
+            lock = Lock()
+
+            def wrapped(block, idx):
+                try:
+                    process_block(
                         block,
                         page,
                         translate_ocg_xref,
@@ -547,10 +551,19 @@ def process_page(page_number):
                         progress,
                         page_task
                     )
-                    for idx, block in enumerate(words)
-                ]
-
-                for future in as_completed(block_futures):
+                finally:
+                    if per_block_cb:
+                        with lock:
+                            done_counter["v"] += 1
+                            try:
+                                per_block_cb(
+                                    page_number, done_counter["v"], total_words)
+                            except Exception:
+                                pass
+            with ThreadPoolExecutor() as block_executor:
+                futures = [block_executor.submit(
+                    wrapped, block, idx) for idx, block in enumerate(words)]
+                for future in as_completed(futures):
                     try:
                         future.result()
                     except Exception as e:
@@ -689,6 +702,7 @@ def translate_pdf(
     debug: bool = False,
     ocr_lang: str | None = None,
     output_base: str | os.PathLike | None = None,
+    progress_cb: Optional[Callable[[int, int, str], None]] = None,
 ) -> dict:
     """Programmatic wrapper around the script's page processing logic.
 
@@ -749,13 +763,52 @@ def translate_pdf(
 
     # Process pages sequentially here (less contention inside Gradio); could parallelize if desired
     produced_files: list[str] = []
-    for p in valid_pages:
+    # Initial progress notification
+    if 'total_selected' not in locals():
+        total_selected = len(valid_pages)
+    if progress_cb:
         try:
-            process_page(p)
+            progress_cb(0, total_selected,
+                        f"Starting job: {total_selected} page(s) queued")
+        except Exception:
+            pass
+    total_selected = len(valid_pages)
+    for idx, p in enumerate(valid_pages, start=1):
+        try:
+            if progress_cb:
+                try:
+                    progress_cb(idx-1, total_selected,
+                                f"Processing page {p+1} of {total_selected}")
+                except Exception:
+                    pass
+            # Provide per-block callback to refine progress within page
+
+            def per_block_cb(page_num, blocks_done, blocks_total):
+                # fractional pages completed
+                fractional_done = (idx-1) + (blocks_done /
+                                             max(blocks_total, 1))
+                try:
+                    progress_cb(fractional_done, total_selected,
+                                f"Page {page_num+1}: {blocks_done}/{blocks_total} blocks")
+                except Exception:
+                    pass
+            process_page(p, per_block_cb=per_block_cb)
             produced_files.append(
                 str(Path(output_dir) / f"processed_page_{p + 1:03d}.pdf"))
+            if progress_cb:
+                try:
+                    progress_cb(idx, total_selected,
+                                f"Completed page {p+1} of {total_selected}")
+                except Exception:
+                    pass
         except Exception as e:
             print(f"Failed processing page {p + 1}: {e}")
+            if progress_cb:
+                try:
+                    progress_cb(idx, total_selected,
+                                f"Error on page {p+1}: {e}")
+                except Exception:
+                    pass
 
     # Merge pages into single PDF
     merged_pdf_path = Path(output_dir) / "translated_pages_merged.pdf"

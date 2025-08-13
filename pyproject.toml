@@ -15,4 +15,6 @@ dependencies = [
     "pytesseract>=0.3.13",
     "python-dotenv>=1.1.1",
     "rich>=14.1.0",
+    "fastapi>=0.112.0",
+    "uvicorn>=0.30.0",
 ]
